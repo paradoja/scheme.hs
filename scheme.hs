@@ -108,9 +108,9 @@ parsePrefix = try exactBase
 
 parseSign :: Parser Integer
 parseSign = do s <- oneOf "+-"
-               if s == '+'
-               then return 1
-               else return (-1)
+               return $ if s == '+'
+                        then 1
+                        else (-1)
 
 digitsFor :: Integer -> String
 digitsFor 2  = "01"
@@ -275,6 +275,22 @@ parseDottedList = do head <- endBy parseExpr spaces
                      tail <- char '.' >> spaces >> parseExpr
                      return $ DottedList head tail
 
+parseUnquoted :: Parser LispVal
+parseUnquoted = do char ','
+                   x <- parseExpr
+                   return $ List [Symbol "unquote", x]
+
+parseUnquoteSpliced :: Parser LispVal
+parseUnquoteSpliced = do char ','
+                         char '@'
+                         x <- parseExpr
+                         return $ List [Symbol "unquote-splicing", x]
+
+parseQuasiquoted :: Parser LispVal
+parseQuasiquoted = do char '`'
+                      x <- parseExpr
+                      return $ List [Symbol "quasiquote", x]
+
 parseQuoted :: Parser LispVal
 parseQuoted = do  char '\''
                   x <- parseExpr
@@ -288,6 +304,9 @@ parseExpr = try parseBool
             <|> parseSymbol
             <|> parseString
             <|> parseQuoted
+            <|> parseQuasiquoted
+            <|> try parseUnquoteSpliced
+            <|> parseUnquoted
             <|> do char '('
                    x <- try parseList <|> parseDottedList
                    char ')'
