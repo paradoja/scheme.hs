@@ -8,10 +8,8 @@ import Data.List (findIndex)
 
 data LispNumber = LInteger Integer
                 | LRational Rational
-                | LRealShort Float
                 | LRealSingle Float
                 | LRealDouble Double
-                | LRealLong Double
                 | LExactComplex Rational Rational
                 | LInexactComplex Double Double
                   deriving Show
@@ -27,7 +25,7 @@ data LispVal = Symbol String
                deriving Show
 
 data Exactness = Exact | Inexact | Unknown deriving (Eq, Show)
-data Precision = Short | Single | Double | Long deriving (Eq, Show)
+data Precision = Single | Double deriving (Eq, Show)
 type Reader = (String -> [(Integer, String)], Integer)
 
 newExactness :: Exactness -> Bool -> Exactness
@@ -35,6 +33,13 @@ newExactness Inexact _     = Inexact
 newExactness Exact   _     = Exact
 newExactness _       False = Inexact
 newExactness e       True  = e
+
+extract :: LispVal -> (Rational, Exactness)
+extract (Number (LInteger    n)) = (toRational n, Exact)
+extract (Number (LRational   n)) = (n           , Exact)
+extract (Number (LRealSingle n)) = (toRational n, Inexact)
+extract (Number (LRealDouble n)) = (toRational n, Inexact)
+extract _ = error "Cannot extract"
 
 (&) :: Exactness -> Exactness -> Exactness
 Unknown & e = e
@@ -101,20 +106,25 @@ parsePrefix = try exactBase
                          e <- try parsePrefixExactness <|> return Unknown
                          return (e, b)
 
-hexDigits = "0123456789aAbBcCdDeEfF"
-
 parseSign :: Parser Integer
 parseSign = do s <- oneOf "+-"
                if s == '+'
                then return 1
                else return (-1)
 
+digitsFor :: Integer -> String
+digitsFor 2  = "01"
+digitsFor 8  = "01234567"
+digitsFor 10 = "0123456789"
+digitsFor 16 = "0123456789aAbBcCdDeEfF"
+
 parseBareUInteger :: Exactness -> Reader -> Parser (Integer, Exactness)
-parseBareUInteger exactness reader = do before <- liftM (fst . head . fst reader) $ many1 digit -- XXX
+parseBareUInteger exactness reader = do before <- liftM (fst . head . fst reader) $ many1 $ oneOf baseDigits
                                         hashes <- many (char '#')
                                         let base = snd reader
                                         let n = before * base ^ length hashes
                                         return (n, newExactness exactness $ null hashes)
+    where baseDigits = digitsFor $ snd reader
 
 parseBareRational :: Exactness -> Reader -> Parser (Rational, Exactness)
 parseBareRational exactness reader = do (n, e) <- parseBareUInteger exactness reader
@@ -145,9 +155,8 @@ parseBareSufix exactness reader = do exp <- oneOf exponentMarkers
                                      s <- try parseSign <|> return 1
                                      d <- liftM (fst . head . fst reader) $ many1 digit
                                      let exponent = case toLower exp of
-                                                      's' -> Short
+                                                      's' -> Single
                                                       'f' -> Single
-                                                      'l' -> Long
                                                       _   -> Double
                                      return (exponent, s * d, exactness & Inexact)
   where exponentMarkers = "eEsSfFdDlL"
@@ -157,10 +166,8 @@ parseSufix exactness reader = try (parseBareSufix exactness reader)
                               <|> return (Double, 0, exactness & Unknown)
 
 getDecimal :: Precision -> Double -> LispNumber
-getDecimal Short  = LRealShort . fromRational . toRational
 getDecimal Single = LRealSingle . fromRational . toRational
 getDecimal Double = LRealDouble . fromRational . toRational
-getDecimal Long   = LRealLong . fromRational . toRational
 
 resolveDecimal :: String -> Precision -> Integer -> Exactness -> Reader -> LispNumber
 resolveDecimal string prec power exactness reader =  if exactness == Exact
@@ -170,7 +177,7 @@ resolveDecimal string prec power exactness reader =  if exactness == Exact
           pointPos = fromIntegral $ case mPointPos of
                                       Just r -> r
                                       _      -> 0
-          exp = fromIntegral $ snd reader ^ (power-pointPos)
+          exp = fromIntegral (snd reader) ** fromIntegral (power-pointPos)
           string' = filter (/='.') string
           number = exp * fromIntegral (fst . head . fst reader $ string')
 
@@ -200,34 +207,41 @@ parseDecimal3 exactness reader = do char '.'
                                     let n = '.' : after
                                     return . Number $ resolveDecimal n prec power e reader
 
-parseDecimal4 :: Exactness -> Reader -> Parser LispVal
-parseDecimal4 exactness reader = do n <- many1 digit
-                                    (prec, power, e) <- parseSufix exactness reader
-                                    return . Number $ resolveDecimal n prec power e reader
-
 parseDecimal :: Exactness -> Reader -> Parser LispVal
 parseDecimal exactness reader = try (parseDecimal1 exactness reader)
                                 <|> try (parseDecimal2 exactness reader)
-                                <|> try (parseDecimal3 exactness reader)
-                                <|> parseDecimal4 exactness reader
+                                <|> parseDecimal3 exactness reader
+
 
 parseUReal :: Exactness -> Reader -> Parser LispVal
 parseUReal exactness reader = try (parseRational exactness reader)
                               <|> try (parseDecimal exactness reader)
                               <|> parseUInteger exactness reader
 
-parseImaginary exactness reader = do (i, e) <- parseBareImaginary
-                                     let val = case exactness & e of
-                                                 Inexact -> Number $ LInexactComplex 0 $ fromIntegral i
-                                                 _       -> Number $ LExactComplex 0 i
+parseImaginary :: Exactness -> Reader -> Parser LispVal
+parseImaginary exactness reader = do first <- parseUReal exactness reader <|> return (Number . LRational $ 0)
+                                     sign <- parseSign
+                                     second <- parseUReal exactness reader <|> return (Number . LRational $ 1)
+                                     char 'i'
+                                     let (f, e) = extract first
+                                     let (s, e') = extract second
+                                     let val = if exactness == Inexact || Inexact `elem` [e, e']
+                                               then Number $ LInexactComplex (fromRational f) (fromIntegral sign * fromRational s)
+                                               else Number $ LExactComplex f (fromIntegral sign * s)
                                      return val
-    where parseBareImaginary = do s <- parseSign
-                                  d <- parseDecimal exactness reader <|> return (1, Unknown) -- XXX
-                                  oneOf "iI" -- XXX
-                                  return (fromIntegral s * d, exactness) -- XXX
 
 parsePolar :: Exactness -> Reader -> Parser LispVal
-parsePolar = undefined
+parsePolar exactness reader = do first <- parseUReal exactness reader
+                                 char '@'
+                                 second <- parseUReal exactness reader
+                                 let (f, _) = extract first
+                                 let (s, _) = extract second
+                                 let real = fromRational f * cos (fromRational s)
+                                 let imag = fromRational f * sin (fromRational s)
+                                 let val = if exactness & Inexact == Inexact
+                                           then Number $ LInexactComplex real imag
+                                           else Number $ LExactComplex (toRational real) (toRational imag)
+                                 return val
 
 parseComplex :: Exactness -> Reader -> Parser LispVal
 parseComplex exactness reader = try (parseImaginary exactness reader)
